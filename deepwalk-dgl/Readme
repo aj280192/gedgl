@@ -1,0 +1,33 @@
+The deepwalk algorithm is build referring the code of deep walk build on top of DGL https://github.com/ShawXh/DeepWalk-dgl
+
+The implementation includes multi-processing training with CPU and mixed training with CPU and multi-GPU.
+
+# Dependencies
+PyTorch 1.0.1+
+DGL v0.4
+
+## Tested version
+- PyTorch 1.4.0
+- Networkx 2.4
+- DGL 0.4.3post2
+- Python 3.7
+
+# How to run the code
+Format of a network file:
+
+1(node id) 2(node id)
+1 3
+...
+
+# Format of embedding file:
+
+1(node id) 0.1 0.34 0.5 ...
+2(node id) 0.5 0.4 0.6 ...
+...
+
+# To run the code:
+1. Run deepwalk.py with all default variable(use sample_graph1.tsv for testing)
+python deepwalk.py 
+
+2. Run deepwalk.py setting the argument parameter
+python deepwalk.py --net_file net.txt --emb_file emb.txt --adam --mix --lr 0.2 --num_procs 4 --batch_size 100 --negative 5
