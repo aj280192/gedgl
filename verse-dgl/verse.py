@@ -1,77 +1,21 @@
 import torch
-from functools import wraps
-from _thread import start_new_thread
 import torch.multiprocessing as mp
 
-import os
 import numpy as np
 import scipy.sparse as sp
-from dgl.data.utils import download, _get_dgl_url, get_download_dir, extract_archive
 import random
 import time
 import dgl
 
+import math
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn import init
 from math import log
 
 import argparse
-import dgl
-import torch.multiprocessing as mp
-import time
-
-
-def thread_wrapped_func(func):
-    """Wrapped func for torch.multiprocessing.Process.
-    With this wrapper we can use OMP threads in subprocesses
-    otherwise, OMP_NUM_THREADS=1 is mandatory.
-    How to use:
-    @thread_wrapped_func
-    def func_to_wrap(args ...):
-    """
-    @wraps(func)
-    def decorated_function(*args, **kwargs):
-        queue = mp.Queue()
-        def _queue_result():
-            exception, trace, res = None, None, None
-            try:
-                res = func(*args, **kwargs)
-            except Exception as e:
-                exception = e
-                trace = traceback.format_exc()
-            queue.put((res, exception, trace))
-
-        start_new_thread(_queue_result, ())
-        result, exception, trace = queue.get()
-        if exception is None:
-            return result
-        else:
-            assert isinstance(exception, Exception)
-            raise exception.__class__(trace)
-    return decorated_function
 
 def ReadTxtNet(file_path="", undirected=True):
-    """ Read the txt network file. 
-    Notations: The network is unweighted.
-    Parameters
-    ----------
-    file_path str : path of network file
-    undirected bool : whether the edges are undirected
-    Return
-    ------
-    net dict : a dict recording the connections in the graph
-    node2id dict : a dict mapping the nodes to their embedding indices 
-    id2node dict : a dict mapping nodes embedding indices to the nodes
-    """
-    if file_path == 'youtube' or file_path == 'blog':
-        name = file_path
-        dir = get_download_dir()
-        zip_file_path='{}/{}.zip'.format(dir, name)
-        download(_get_dgl_url(os.path.join('dataset/DeepWalk/', '{}.zip'.format(file_path))), path=zip_file_path)
-        extract_archive(zip_file_path,
-                        '{}/{}'.format(dir, name))
-        file_path = "{}/{}/{}-net.txt".format(dir, name, name)
+    """ Read the txt network file """ 
 
     node2id = {}
     id2node = {}
@@ -136,6 +80,15 @@ def net2graph(net_sm):
     print("Building DGLGraph in %.2fs" % t)
     return G
 
+def node_edge_list(G):
+    """ Function returns node and edge list of graph """
+    nodes = list(G.nodes())
+    edges = {}
+    for node in nodes:
+        edges[node] = G.successors(node)
+    return nodes, edges
+
+
 class Verse(nn.Module):
     """ Negative sampling based skip-gram """
     def __init__(self, 
@@ -145,10 +98,7 @@ class Verse(nn.Module):
         epochs,
         negative,
         lr,
-        alpha,
-        only_gpu,
-        only_cpu,
-        mix
+        alpha
         ):
         """ initialize embedding on CPU 
         Paremeters
@@ -167,21 +117,12 @@ class Verse(nn.Module):
         self.edges = edges
         self.num_nodes = len(nodes)
         self.emb_dimension = emb_dimension
-        self.epochs = epochs
+        self.epochs = math.ceil(epochs/4) # dividing epochs to 4 for running loop in parallel
         self.negative = negative
         self.lr = lr
         self.alpha = alpha
         self.nce_bias = log(self.num_nodes)
         self.nce_neg_bias = log(self.num_nodes/negative)
-        self.train_count = self.num_nodes * epochs
-        self.only_cpu = only_cpu
-        self.only_gpu = only_gpu
-        self.mixed_train = mix
-        
-        print("train count : {}".format(self.train_count))
-        
-        # initialize the device as cpu
-        self.device = torch.device("cpu")
 
         # content embedding
         self.W = nn.Embedding(
@@ -197,59 +138,53 @@ class Verse(nn.Module):
         self.lookup_table[0] = 0.
         self.lookup_table[-1] = 1.
 
-    def share_memory(self):
-        """ share the parameters across subprocesses """
-        self.W.weight.share_memory_()
-
-    def set_device(self, gpu_id):
-        """ set gpu device """
-        self.device = torch.device("cuda:%d" % gpu_id)
-        print("The device is", self.device)
-        self.lookup_table = self.lookup_table.to(self.device)
-
-
-    def all_to_device(self, gpu_id):
-        """ move all of the parameters to a single GPU """
-        self.device = torch.device("cuda:%d" % gpu_id)
-        self.set_device(gpu_id)
-        self.W = self.W.cuda(gpu_id)
-
     def fast_sigmoid(self, score):
         """ do fast sigmoid by looking up in a pre-defined table """
         idx = torch.floor((score + 6.01) / 0.01).long()
         return self.lookup_table[idx]
 
-    def fast_learn(self):
+    def train(self):
         """ fast learning with auto grad off
         """
-        print("inside fast learn")
-        lr = self.lr
-        nce_bias = self.nce_bias
-        nce_neg_bias = self.nce_neg_bias
-        negative = self.negative
-        count = 0
-        train_count = self.train_count
-        while (True):
-            if (count > train_count):
-                break
-            u_node = random.choice(self.nodes)
-            v_node = self.sample_neighbor(u_node)
-            self.update(u_node,v_node, 1, nce_bias, lr)
-            for i in range(negative):
-                v_neg_node = random.choice(self.nodes)
-                self.update(u_node,v_neg_node, 0, nce_neg_bias, lr)
-            count += 1
-        return
-    
-    def update(self, u, v, label, bias, lr):
-        score = -bias
-        W_u = self.W.weight[u]
-        W_v = self.W.weight[v]
-        score += torch.mul(W_u,W_v)
-        score = torch.clamp(score, max=6, min=-6)
-        score = (label - self.fast_sigmoid(score)) * lr
-        self.W.weight[u] += W_v * score
-        self.W.weight[v] += W_u * score
+        for i in range(self.epochs):
+            with torch.no_grad():
+                lr = self.lr
+                nce_bias = self.nce_bias
+                nce_neg_bias = self.nce_neg_bias
+                
+                # genarating positive and negative indexes
+                idx_pos_u, idx_pos_v, idx_neg_u, idx_neg_v = self.sample_index() # generating the samples for current epoch
+                
+
+                # positive 
+                emb_pos_u = self.W(idx_pos_u).to('cpu')
+                emb_pos_v = self.W(idx_pos_v).to('cpu')
+
+
+                pos_score = torch.sum(torch.mul(emb_pos_u,emb_pos_v), dim=1) - nce_bias
+                pos_score = torch.clamp(pos_score, max = 6, min = -6)
+                score = ((1 - self.fast_sigmoid(pos_score)) * lr).unsqueeze(1)
+                grad_u_pos = score * emb_pos_v 
+                grad_v_pos = score * emb_pos_u
+
+                self.W.weight.data.index_add_(0,idx_pos_u,grad_u_pos)
+                self.W.weight.data.index_add_(0,idx_pos_v,grad_v_pos)
+
+
+                # negatives
+                emb_neg_u = self.W(idx_neg_u).to('cpu')
+                emb_neg_v = self.W(idx_neg_v).to('cpu')
+
+
+                neg_score = torch.sum(torch.mul(emb_neg_u,emb_neg_v), dim=1) - nce_neg_bias
+                neg_score = torch.clamp(neg_score, max = 6, min = -6)
+                score = (0 - self.fast_sigmoid(neg_score) * lr).unsqueeze(1)
+                grad_u_neg = score * emb_neg_v 
+                grad_v_neg = score * emb_neg_u
+
+                self.W.weight.data.index_add_(0,idx_neg_u,grad_u_neg)
+                self.W.weight.data.index_add_(0,idx_neg_v,grad_v_neg)
+
         return
 
     def save_embedding_txt(self, id2node, file_name):
@@ -273,113 +208,50 @@ class Verse(nn.Module):
         else:
             v = node
         return v
-    
-class Trainer:
-    def __init__(self, args):
-        """ Initializing the trainer with the input arguments """
-        self.args = args
-        self.net, self.node2id, self.id2node, self.sm = ReadTxtNet(args.net_file)
-        self.G = net2graph(self.sm)
-        self.nodes, self.edges = self.node_edge_list()
-        self.emb_model = None
 
-    def init_device_emb(self):
-        """ set the device before training 
-        will be called once in fast_train_mp / fast_train
-        """
-        choices = sum([self.args.only_gpu, self.args.only_cpu, self.args.mix])
-        assert choices == 1, "Must choose only *one* training mode in [only_cpu, only_gpu, mix]"
-        
-        # initializing embedding on CPU
-        self.emb_model = Verse(
-            nodes=self.nodes, 
-            edges=self.edges,
-            emb_dimension=self.args.dim,
-            epochs = self.args.epochs,
-            negative= self.args.negative,
-            lr = self.args.lr,
-            alpha = self.args.alpha,
-            only_cpu=self.args.only_cpu,
-            only_gpu=self.args.only_gpu,
-            mix=self.args.mix
-            )
-        
-        torch.set_num_threads(self.args.num_threads)
-        if self.args.only_gpu:
-            print("Run in 1 GPU")
-            assert self.args.gpus[0] >= 0
-            self.emb_model.all_to_device(self.args.gpus[0])
-        elif self.args.mix:
-            print("Mix CPU with %d GPU" % len(self.args.gpus))
-            if len(self.args.gpus) == 1:
-                assert self.args.gpus[0] >= 0, 'mix CPU with GPU should have avaliable GPU'
-                self.emb_model.set_device(self.args.gpus[0])
-        else:
-            print("Run in CPU process")
-            self.args.gpus = [torch.device('cpu')]
+    def sample_index(self):
+        nodes = self.nodes
+        num_nodes = self.num_nodes
+        negatives = self.negative
+        index_pos_u = []
+        index_pos_v = []
+        index_neg_u = []
+        index_neg_v = []
 
-
-    def train(self):
-        """ train the embedding """
-        if len(self.args.gpus) > 1:
-            self.fast_train_mp()
-        else:
-            self.fast_train()
-
-    def fast_train_mp(self):
-        """ multi-cpu-core or mix cpu & multi-gpu """
-        self.init_device_emb()
-        self.emb_model.share_memory()
-
-        start_all = time.time()
-        ps = []
-
-        for i in range(len(self.args.gpus)):
-            p = mp.Process(target=self.fast_train_sp, args=(self.args.gpus[i],))
-            ps.append(p)
-            p.start()
-
-        for p in ps:
-            p.join()
-        
-        print("Used time: %.2fs" % (time.time()-start_all))
-        
-        self.emb_model.save_embedding_txt(self.id2node, self.args.output_emb_file)
-
-    @thread_wrapped_func
-    def fast_train_sp(self, gpu_id):
-        """ a subprocess for fast_train_mp """
-        if self.args.mix:
-            self.emb_model.set_device(gpu_id)
-        torch.set_num_threads(self.args.num_threads)
-        
-        start = time.time()
-        with torch.no_grad():
-            self.emb_model.fast_learn()
+        for i in range(num_nodes): 
             
-
-    def fast_train(self):
-        """ fast train with dataloader """
-        self.init_device_emb()
-        print("inside train!!")
-
-        start_all = time.time()
-        with torch.no_grad():
-            print("calling train method of modal!!")
-            self.emb_model.fast_learn()
+            u = random.choice(nodes)   # sampled node
             
-        print("Training used time: %.2fs" % (time.time()-start_all))
-        
-        self.emb_model.save_embedding_txt(self.id2node, self.args.output_file)
+            index_pos_u.append(u) # sample u
+            index_pos_v.append(self.sample_neighbor(u)) # positive sample v
+            
+            index_neg_u.extend([u] * negatives) # sample u added for negatives
+            for j in range(negatives):
+                index_neg_v.append(random.choice(nodes)) # negative sample v_
+
+
+        index_pos_u = torch.LongTensor(index_pos_u)
+        index_pos_v = torch.LongTensor(index_pos_v)
+
+        index_neg_u = torch.LongTensor(index_neg_u)
+        index_neg_v = torch.LongTensor(index_neg_v)    
+
+        return index_pos_u,index_pos_v,index_neg_u,index_neg_v
     
-    def node_edge_list(self):
-        G = self.G
-        nodes = list(G.nodes())
-        edges = {}
-        for node in nodes:
-            edges[node] = G.successors(node)
-        del G
-        return nodes, edges
+    def train_mp(self):
+        if self.epochs > 4:
+            self.epochs = math.ceil(self.epochs/4)
+            ps = []
+            for i in range(4):
+                p = mp.Process(target=self.train())
+                ps.append(p)
+                p.start()
+    
+            for p in ps:
+                p.join()
+        else:
+            self.train()
+    
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Verse")
@@ -395,21 +267,18 @@ if __name__ == '__main__':
             help="epochs")
     parser.add_argument('--lr', default=0.2, type=float, 
             help="learning rate")
-    parser.add_argument('--mix', default=False, action="store_true", 
-            help="mixed training with CPU and GPU")
-    parser.add_argument('--only_cpu', default=False, action="store_true", 
-            help="training with CPU")
-    parser.add_argument('--only_gpu', default=False, action="store_true", 
-            help="training with GPU")
-    parser.add_argument('--num_threads', default=2, type=int, 
-            help="number of threads used for each CPU-core/GPU")
-    parser.add_argument('--gpus', type=int, default=[-1], nargs='+', 
-            help='a list of active gpu ids, e.g. 0')
     parser.add_argument('--alpha', type=float, default=0.85,  
             help='alpha-value must be float less than 1')
     args = parser.parse_args()
 
+    net,node2id,id2node,net_sm = ReadTxtNet(args.net_file)
+    G = net2graph(net_sm)
+    nodes,edges = node_edge_list(G)
+    
+    model = Verse(nodes,edges,args.dim,args.epochs,args.negative,args.lr,args.alpha)
+    
     start_time = time.time()
-    trainer = Trainer(args)
-    trainer.train()
-    print("Total used time: %.2f" % (time.time() - start_time))
+    model.train_mp()
+    print("Total used time for training: %.2f" % (time.time() - start_time))
+    
+    model.save_embedding_txt(id2node,args.output_file)
