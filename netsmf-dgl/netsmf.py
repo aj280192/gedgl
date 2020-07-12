@@ -137,22 +137,17 @@ class NetSMF():
         self.worker = worker
         self.num_round = num_round
 
-    def train(self, G,node2id,id2node):
+    def train(self, G):
         self.G = G
         self.is_directed = True
         self.num_node = self.G.number_of_nodes()
         self.num_edge = self.G.number_of_edges()
-        self.edges = [[node2id[int(e1)], node2id[int(e2)]] for e1,e2 in zip(self.G.edges()[0], self.G.edges()[1])]
+        self.edges = [[int(src), int(dst)] for src,dst in zip(self.G.edges()[0], self.G.edges()[1])]
 
 
-        self.num_neigh = np.asarray(
-            [len(list(self.G.successors(id2node[i]))) for i in range(self.num_node)]
-        )
+        self.num_neigh = np.asarray([len(list(self.G.successors(i))) for i in range(self.num_node)])
         
-        self.neighbors =  [
-            [node2id[int(v)] for v in self.G.successors(id2node[i])]
-            for i in range(self.num_node)
-        ]
+        self.neighbors =  [[int(v) for v in self.G.successors(i)] for i in range(self.num_node)]
         
         s = time.time()
         self.alias_nodes = {}
@@ -160,16 +155,11 @@ class NetSMF():
         
         for i in range(self.num_node):
             
-            unnormalized_probs = [1 for nbr in self.G.successors(id2node[i])] # defaulting the weight for graph to 1
+            unnormalized_probs = [1 for _ in self.G.successors(i)] # defaulting the weight for graph to 1
             norm_const = sum(unnormalized_probs)
             normalized_probs = [float(u_prob) / norm_const for u_prob in unnormalized_probs]
             self.alias_nodes[i] = alias_setup(normalized_probs)
-            self.node_weight[i] = dict(
-                zip(
-                    [node2id[int(nbr)] for nbr in self.G.successors(id2node[i])],
-                    unnormalized_probs,
-                )
-            )
+            self.node_weight[i] = dict(zip([int(nbr) for nbr in self.G.successors(i)],unnormalized_probs,))
 
         t = time.time()
         print("alias_nodes", t - s)
@@ -293,7 +283,7 @@ if __name__ == "__main__":
     
     start_time = time.time()
     model = NetSMF(args.dim,args.window,args.negative,args.num_round,args.worker)
-    embedding = model.train(G,node2id,id2node)
+    embedding = model.train(G)
     print("Total used time: %.2f" % (time.time() - start_time))
     
     save_embedding(args.output,embedding,id2node)
