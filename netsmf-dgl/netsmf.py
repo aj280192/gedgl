@@ -8,6 +8,7 @@ from sklearn.utils.extmath import randomized_svd
 from multiprocessing import Pool
 import time
 
+
 def ReadTxtNet(file_path="", undirected=True):
     """ Read the txt network file."""
 
@@ -122,7 +123,7 @@ def alias_draw(J, q):
     Draw sample from a non-uniform discrete distribution using alias sampling.
     """
     K = len(J)
-
+    
     kk = int(np.floor(np.random.rand() * K))
     if np.random.rand() < q[kk]:
         return kk
@@ -155,6 +156,7 @@ class NetSMF():
         
         for i in range(self.num_node):
             
+            
             unnormalized_probs = [1 for _ in self.G.successors(i)] # defaulting the weight for graph to 1
             norm_const = sum(unnormalized_probs)
             normalized_probs = [float(u_prob) / norm_const for u_prob in unnormalized_probs]
@@ -179,16 +181,21 @@ class NetSMF():
         print("random walk time", time.time() - t0)
 
         matrix = sp.lil_matrix((self.num_node, self.num_node))
-        A = self.G.adjacency_matrix_scipy()
-        degree = sp.diags(np.array(A.sum(axis=0))[0], format="csr")
-        degree_inv = degree.power(-1)
-
+        
         t1 = time.time()
         for res in results:
             matrix += res.get()
         print("number of nzz", matrix.nnz)
+        
         t2 = time.time()
         print("construct random walk matrix time", time.time() - t1)
+        
+        del results
+        
+        A = self.G.adjacency_matrix_scipy()
+        degree = sp.diags(np.array(A.sum(axis=0))[0], format="csr")
+        degree_inv = degree.power(-1)
+
 
         L = sp.csgraph.laplacian(matrix, normed=False, return_diag=False)
         M = degree_inv.dot(degree - L).dot(degree_inv)
@@ -236,17 +243,17 @@ class NetSMF():
         # construct matrix based on random walk
         np.random.seed(pid)
         matrix = sp.lil_matrix((self.num_node, self.num_node))
-        t0 = time.time()
+        #t0 = time.time()
         for round in range(int(self.num_round / self.worker)):
-            if round % 10 == 0 and pid == 0:
-                print(
-                    "round %d / %d, time: %lf"
-                    % (round * self.worker, self.num_round, time.time() - t0)
-                )
+            #if round % 10 == 0 and pid == 0:
+            #    print(
+            #        "round %d / %d, time: %lf"
+            #        % (round * self.worker, self.num_round, time.time() - t0)
+            #    )
             for i in range(self.num_edge):
                 u, v = self.edges[i]
-                if not self.is_directed and np.random.rand() > 0.5:
-                    v, u = self.edges[i]
+                #if not self.is_directed and np.random.rand() > 0.5:
+                #   v, u = self.edges[i]
                 for r in range(1, self.window_size + 1):
                     u_, v_, zp = self._path_sampling(u, v, r)
                     matrix[u_, v_] += 2 * r / self.window_size / self.num_round / zp
