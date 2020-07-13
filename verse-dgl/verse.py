@@ -98,7 +98,8 @@ class Verse(nn.Module):
         epochs,
         negative,
         lr,
-        alpha
+        alpha,
+        worker
         ):
         """ initialize embedding on CPU 
         Paremeters
@@ -111,6 +112,7 @@ class Verse(nn.Module):
         negative int : number of negative samples per positive sample
         lr float : initial learning rate
         alpha float : restart factor
+        worker : number of processes for parallel processing
         """
         super(Verse, self).__init__()
         self.nodes = nodes
@@ -121,6 +123,7 @@ class Verse(nn.Module):
         self.negative = negative
         self.lr = lr
         self.alpha = alpha
+        self.worker = worker
         self.nce_bias = log(self.num_nodes)
         self.nce_neg_bias = log(self.num_nodes/negative)
 
@@ -239,10 +242,10 @@ class Verse(nn.Module):
         return index_pos_u,index_pos_v,index_neg_u,index_neg_v
     
     def train_mp(self):
-        if self.epochs > 4:
-            self.epochs = math.ceil(self.epochs/4)
+        if self.epochs > self.worker:
+            self.epochs = math.ceil(self.epochs/self.worker)
             ps = []
-            for i in range(4):
+            for i in range(self.worker):
                 p = mp.Process(target=self.train())
                 ps.append(p)
                 p.start()
@@ -265,17 +268,19 @@ if __name__ == '__main__':
             help="negative samples for each positve node pair")
     parser.add_argument('--epochs', default=1, type=int, 
             help="epochs")
-    parser.add_argument('--lr', default=0.2, type=float, 
+    parser.add_argument('--lr', default=0.0025, type=float, 
             help="learning rate")
     parser.add_argument('--alpha', type=float, default=0.85,  
             help='alpha-value must be float less than 1')
+    parser.add_argument('--worker', type=int, default=4,  
+            help='number of workers for parallel processing')
     args = parser.parse_args()
 
     net,node2id,id2node,net_sm = ReadTxtNet(args.net_file)
     G = net2graph(net_sm)
     nodes,edges = node_edge_list(G)
     
-    model = Verse(nodes,edges,args.dim,args.epochs,args.negative,args.lr,args.alpha)
+    model = Verse(nodes,edges,args.dim,args.epochs,args.negative,args.lr,args.alpha,args.worker)
     
     start_time = time.time()
     model.train_mp()
