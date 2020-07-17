@@ -243,17 +243,9 @@ class NetSMF():
         # construct matrix based on random walk
         np.random.seed(pid)
         matrix = sp.lil_matrix((self.num_node, self.num_node))
-        #t0 = time.time()
         for round in range(int(self.num_round / self.worker)):
-            #if round % 10 == 0 and pid == 0:
-            #    print(
-            #        "round %d / %d, time: %lf"
-            #        % (round * self.worker, self.num_round, time.time() - t0)
-            #    )
             for i in range(self.num_edge):
                 u, v = self.edges[i]
-                #if not self.is_directed and np.random.rand() > 0.5:
-                #   v, u = self.edges[i]
                 for r in range(1, self.window_size + 1):
                     u_, v_, zp = self._path_sampling(u, v, r)
                     matrix[u_, v_] += 2 * r / self.window_size / self.num_round / zp
