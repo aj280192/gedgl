@@ -5,116 +5,100 @@ import logging
 from sklearn import linear_model
 from sklearn import metrics
 
-def data_preprocessing(emb_file,edge_list):
+def data_preprocessing(emb_file,edge_file,neg_file):
     data = {}
     with open(emb_file) as e:
         for line in e.readlines()[1:]: #skipping the first line of embedding file
             values = line.strip().split(' ')
             data[int(values[0])] = list(map(float,values[1:]))
-    
-    nodes = list(data.key())
             
     print("embedding value loaded!!")
     
-    edges = []
-    with open(edge_list) as l:
-        for line in l.readlines():
-            node, label = line.strip().split(' ')
-            edges.append((int(node),int(label)))
+    true_edges = []
+    with open(edge_file) as te:
+        for line in te.readlines():
+            src, dst = line.strip().split(' ')
+            true_edges.append((int(src),int(dst)))
     
-    print("edge list created!!")
+    print("True edge list created!!")
     
-    return data, nodes, edges
-
-def random_split(edges,split):
-    
-    total = len(edges)
-    split_index = int(total/(100*split))    
-    random.shuffle(edges)
-    train = edges[:split_index]
-    test = edges[split_index:]
-    return train,test
-
-def add_negative(nodes,edges):
-    """ defaulted to add 30% negatives """
-    
-    neg_count = int(len(edges) * .3)
-    node_len = len(nodes)
-
     neg_edges = []
+    with open(neg_file) as ne:
+        for line in ne.readlines():
+            node, label = line.strip().split(' ')
+            neg_edges.append((int(src),int(dst)))
     
-    for _ in range(neg_count):
-        trail = 0
-        while True:
-            x = nodes[random.randint(0,node_len-1)]
-            y = nodes[random.randint(0,node_len-1)]
-            trail += 1
-            if trail >= 1000:
-                all_flag = True
-                break
-            if x != y and (x,y) not in edges and (y,x) not in edges:
-                neg_edges.append((x,y))
-                break
-        if all_flag:
-            break
+    return data, true_edges, neg_edges
+
+def random_split(true_edges,neg_edges,split):
     
-    return neg_edges
+    true_len = len(true_edges)
+    true_split = int(true_len * split)
+    neg_len = len(neg_edges)
+    neg_split = int(neg_len * split)
+    
+    random.shuffle(true_edges)
+    random.shuffle(neg_edges)
+    
+    true_test  = true_edges[:true_split]
+    true_train = true_edges[true_split:]
+    
+    neg_test  = neg_edges[:neg_split]
+    neg_train = neg_edges[neg_split:]
+    
+    return true_train,true_test,neg_train,neg_test
+
 
 def model_data(true_edge,neg_edge,embedding):
     
-    true_data = []
+    X = []
+    y = []
     for n1, n2 in true_edge:
         node1 = np.array(embedding[n1])
         node2 = np.array(embedding[n2])
         edge_data = np.multiply(node1,node2)
-        true_data.append(edge_data)
+        X.append(edge_data)
+        y.append(1)
     
-    true_y = np.ones(len(true_data))
-    
-    neg_data = []
     for n1, n2 in neg_edge:
         node1 = np.array(embedding[n1])
         node2 = np.array(embedding[n2])
         edge_data = np.multiply(node1,node2)
-        neg_data.append(edge_data)
+        X.append(edge_data)
+        y.append(0)
     
-    neg_y = np.zeros(len(neg_data))
-    
-    X = np.concatenate(np.array(true_data),np.array(neg_data))
-    y = np.concatenate(true_y,neg_y)
+    X = np.array(X)
+    y = np.array(y)
     
     return X,y
 
 if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
-    parser.add_argument("--embfile", type=str, required=True,
+    parser.add_argument("--emb", type=str, required=True,
             help="embedding file path")
-    parser.add_argument("--edgefile", type=str, required=True,
+    parser.add_argument("--edge", type=str, required=True,
             help="edge list file path")
-    parser.add_argument("--datasplit", type=float, default=0.3,
-            help="train and test split")
+    parser.add_argument("--neg", type=str, required=True,
+            help="negative edge list")
+    parser.add_argument("--split", type=float, default=0.4,
+            help="train & test split")
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,
             format='%(asctime)s %(message)s')
     
-    embedding, nodes, edges = data_preprocessing(args.emb_file,args.label_file)
-    print('Obtained nodes and edgelist!!')
-    true_edge_train, true_edge_test = random_split(edges,args.datasplit)
-    print('edgelist split into train and test')
+    embedding, pos_edges, neg_edges = data_preprocessing(args.emb,args.edge, args.neg)
     
-    neg_edge_train = add_negative(nodes,true_edge_train)
-    neg_edge_test  = add_negative(nodes,true_edge_test)
-    print('adding negative to the edges!!')
+    true_train, true_test, neg_train, neg_test = random_split(pos_edges,neg_edges,args.split)
     
-    print('Positive edges for train: {} and test: {}'.format(len(true_edge_train),len(true_edge_test)))
-    print('Negative edges for train: {} and test: {}'.format(len(neg_edge_train),len(neg_edge_test)))
+    print('Positive edges for train: {} and test: {}'.format(len(true_train),len(true_test)))
+    print('Negative edges for train: {} and test: {}'.format(len(neg_train),len(neg_test)))
     
-    X_train, y_train = model_data(true_edge_train,neg_edge_train,embedding)
+    X_train, y_train = model_data(true_train,neg_train,embedding)
     print('Obtained training features!!')
     
-    X_test, y_test   = model_data(true_edge_test,neg_edge_test,embedding)
+    X_test, y_test   = model_data(true_test,neg_test,embedding)
     print('Obtained testing features!!')
     
     model = linear_model.LogisticRegression(random_state=0)
@@ -123,7 +107,7 @@ if __name__ == "__main__":
     model.fit(X_train, y_train)
     print("training complete!!")
     
-    pred_y = model.predict_proba(X_test)
+    pred_y = model.predict(X_test)
     
     test_auc = metrics.roc_auc_score(y_test,pred_y)
     print('AUC of the embedding: {}'.format(test_auc))
