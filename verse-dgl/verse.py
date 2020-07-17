@@ -7,7 +7,6 @@ import random
 import time
 import dgl
 
-import math
 import torch.nn as nn
 from torch.nn import init
 from math import log
@@ -82,10 +81,10 @@ def net2graph(net_sm):
 
 def node_edge_list(G):
     """ Function returns node and edge list of graph """
-    nodes = list(G.nodes())
+    nodes = list(map(int,G.nodes()))
     edges = {}
     for node in nodes:
-        edges[node] = G.successors(node)
+        edges[node] = list(map(int,G.successors(node)))
     return nodes, edges
 
 
@@ -119,7 +118,7 @@ class Verse(nn.Module):
         self.edges = edges
         self.num_nodes = len(nodes)
         self.emb_dimension = emb_dimension
-        self.epochs = math.ceil(epochs/4) # dividing epochs to 4 for running loop in parallel
+        self.epochs = epochs 
         self.negative = negative
         self.lr = lr
         self.alpha = alpha
@@ -149,7 +148,7 @@ class Verse(nn.Module):
     def train(self):
         """ fast learning with auto grad off
         """
-        for i in range(self.epochs):
+        for i in range(int(self.epochs/self.worker)):
             with torch.no_grad():
                 lr = self.lr
                 nce_bias = self.nce_bias
@@ -213,24 +212,20 @@ class Verse(nn.Module):
         return v
 
     def sample_index(self):
-        nodes = self.nodes
         num_nodes = self.num_nodes
         negatives = self.negative
-        index_pos_u = []
-        index_pos_v = []
-        index_neg_u = []
-        index_neg_v = []
+        index_pos_u, index_pos_v, index_neg_u, index_neg_v = [], [], [], []
 
         for i in range(num_nodes): 
             
-            u = random.choice(nodes)   # sampled node
+            u = random.randint(0,num_nodes-1)   # sampled node
             
-            index_pos_u.append(u) # sample u
+            index_pos_u.append(u) # rsample u
             index_pos_v.append(self.sample_neighbor(u)) # positive sample v
             
             index_neg_u.extend([u] * negatives) # sample u added for negatives
             for j in range(negatives):
-                index_neg_v.append(random.choice(nodes)) # negative sample v_
+                index_neg_v.append(random.randint(0,num_nodes-1)) # negative sample v_
 
 
         index_pos_u = torch.LongTensor(index_pos_u)
@@ -242,18 +237,14 @@ class Verse(nn.Module):
         return index_pos_u,index_pos_v,index_neg_u,index_neg_v
     
     def train_mp(self):
-        if self.epochs > self.worker:
-            self.epochs = math.ceil(self.epochs/self.worker)
-            ps = []
-            for i in range(self.worker):
-                p = mp.Process(target=self.train())
-                ps.append(p)
-                p.start()
+        ps = []
+        for i in range(self.worker):
+            p = mp.Process(target=self.train())
+            ps.append(p)
+            p.start()
     
-            for p in ps:
-                p.join()
-        else:
-            self.train()
+        for p in ps:
+            p.join()
     
 
 if __name__ == '__main__':
@@ -272,7 +263,7 @@ if __name__ == '__main__':
             help="learning rate")
     parser.add_argument('--alpha', type=float, default=0.85,  
             help='alpha-value must be float less than 1')
-    parser.add_argument('--worker', type=int, default=4,  
+    parser.add_argument('--worker', type=int, default=1,  
             help='number of workers for parallel processing')
     args = parser.parse_args()
 
@@ -280,7 +271,13 @@ if __name__ == '__main__':
     G = net2graph(net_sm)
     nodes,edges = node_edge_list(G)
     
+    
     model = Verse(nodes,edges,args.dim,args.epochs,args.negative,args.lr,args.alpha,args.worker)
+    if args.worker > 1:
+       model.share_memory()
+       model.train_mp()
+    else:
+       model.train()
     
     start_time = time.time()
     model.train_mp()
