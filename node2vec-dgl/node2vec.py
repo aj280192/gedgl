@@ -17,17 +17,17 @@ class Node2vecTrainer:
         """ Initializing the trainer with the input arguments """
         self.args = args
         self.dataset = Node2vecDataset(
-            net_file=args.net_file,
+            net_file=args.data_file,
             map_file=args.map_file,
-            p=args.p,
-            q=args.q,
             walk_length=args.walk_length,
             window_size=args.window_size,
             num_walks=args.num_walks,
             batch_size=args.batch_size,
             negative=args.negative,
-            num_procs=args.num_procs,
+            gpus=args.gpus,
             fast_neg=args.fast_neg,
+            p=args.p,
+            q=args.q,
             )
         self.emb_size = len(self.dataset.net)
         self.emb_model = None
@@ -38,7 +38,6 @@ class Node2vecTrainer:
         """
         choices = sum([self.args.only_gpu, self.args.only_cpu, self.args.mix])
         assert choices == 1, "Must choose only *one* training mode in [only_cpu, only_gpu, mix]"
-        assert self.args.num_procs >= 1, "The number of process must be larger than 1"
         choices = sum([self.args.sgd, self.args.adam, self.args.avg_sgd])
         assert choices == 1, "Must choose only *one* gradient descent strategy in [sgd, avg_sgd, adam]"
         
@@ -65,17 +64,21 @@ class Node2vecTrainer:
         torch.set_num_threads(self.args.num_threads)
         if self.args.only_gpu:
             print("Run in 1 GPU")
-            self.emb_model.all_to_device(0)
+            assert self.args.gpus[0] >= 0
+            self.emb_model.all_to_device(self.args.gpus[0])
         elif self.args.mix:
-            print("Mix CPU with %d GPU" % self.args.num_procs)
-            if self.args.num_procs == 1:
-                self.emb_model.set_device(0)
+            print("Mix CPU with %d GPU" % len(self.args.gpus))
+            if len(self.args.gpus) == 1:
+                assert self.args.gpus[0] >= 0, 'mix CPU with GPU should have abaliable GPU'
+                self.emb_model.set_device(self.args.gpus[0])
         else:
-            print("Run in %d CPU process" % self.args.num_procs)
+            print("Run in CPU process")
+            self.args.gpus = [torch.device('cpu')]
+
 
     def train(self):
         """ train the embedding """
-        if self.args.num_procs > 1:
+        if len(self.args.gpus) > 1:
             self.fast_train_mp()
         else:
             self.fast_train()
@@ -88,30 +91,29 @@ class Node2vecTrainer:
         start_all = time.time()
         ps = []
 
-        np_ = self.args.num_procs
-        for i in range(np_):
-            p = mp.Process(target=self.fast_train_sp, args=(i,))
+        for i in range(len(self.args.gpus)):
+            p = mp.Process(target=self.fast_train_sp, args=(self.args.gpus[i],))
             ps.append(p)
             p.start()
 
         for p in ps:
             p.join()
         
-        print("Time to complete multiprocess: %.2fs" % (time.time()-start_all))
-        #self.emb_model.save_embedding(self.dataset, self.args.emb_file)
-        self.emb_model.save_embedding_txt(self.dataset, self.args.emb_file)
+        print("Used time: %.2fs" % (time.time()-start_all))
+        if self.args.save_in_txt:
+            self.emb_model.save_embedding_txt(self.dataset, self.args.output_emb_file)
+        else:
+            self.emb_model.save_embedding(self.dataset, self.args.output_emb_file)
 
     @thread_wrapped_func
     def fast_train_sp(self, gpu_id):
         """ a subprocess for fast_train_mp """
-        train_start = time.time()
         if self.args.mix:
             self.emb_model.set_device(gpu_id)
         torch.set_num_threads(self.args.num_threads)
 
         sampler = self.dataset.create_sampler(gpu_id)
 
-        data_time = time.time()
         dataloader = DataLoader(
             dataset=sampler.seeds,
             batch_size=self.args.batch_size,
@@ -121,8 +123,7 @@ class Node2vecTrainer:
             num_workers=4,
             )
         num_batches = len(dataloader)
-        print("time for data load %f" % (time.time()- data_time))
-        #print("num batchs: %d in subprocess [%d]" % (num_batches, gpu_id))
+        print("num batchs: %d in subprocess [%d]" % (num_batches, gpu_id))
         # number of positive node pairs in a sequence
         num_pos = int(2 * self.args.walk_length * self.args.window_size\
             - self.args.window_size * (self.args.window_size + 1))
@@ -151,8 +152,6 @@ class Node2vecTrainer:
                 if i > 0 and i % self.args.print_interval == 0:
                     print("Solver [%d] batch %d tt: %.2fs" % (gpu_id, i, time.time()-start))
                     start = time.time()
-        
-        print('time required for training: %.2fs' % (time.time()-train_start))
 
     def fast_train(self):
         """ fast train with dataloader """
@@ -164,8 +163,8 @@ class Node2vecTrainer:
         self.init_device_emb()
 
         sampler = self.dataset.create_sampler(0)
-
-        data_time = time.time()
+        
+        rwt = time.time()
         dataloader = DataLoader(
             dataset=sampler.seeds,
             batch_size=self.args.batch_size,
@@ -175,9 +174,9 @@ class Node2vecTrainer:
             num_workers=4,
             )
         
+        print("random walk generated in : {}".format(time.time() - rwt) )
         num_batches = len(dataloader)
-        print('data load time: %f' % (time.time()-data_time))
-        #print("num batchs: %d" % num_batches)
+        print("num batchs: %d" % num_batches)
 
         start_all = time.time()
         start = time.time()
@@ -208,15 +207,21 @@ class Node2vecTrainer:
                         start = time.time()
 
         print("Training used time: %.2fs" % (time.time()-start_all))
-        #self.emb_model.save_embedding(self.dataset, self.args.emb_file)
-        self.emb_model.save_embedding_txt(self.dataset, self.args.emb_file)
+        rt = time.time()
+        if self.args.save_in_txt:
+            self.emb_model.save_embedding_txt(self.dataset, self.args.output_emb_file)
+        else:
+            self.emb_model.save_embedding(self.dataset, self.args.output_emb_file)
+        print("time to write file: {}".format(time.time() - rt))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="DeepWalk")
-    parser.add_argument('--net_file', type=str, 
-            help="path of the txt network file")
-    parser.add_argument('--emb_file', type=str, default="emb.npy",
-            help='path of the npy embedding file')
+    parser.add_argument('--data_file', type=str, 
+            help="path of the txt network file, builtin dataset include youtube-net and blog-net") 
+    parser.add_argument('--save_in_txt', default=False, action="store_true",
+            help='Whether save dat in txt format or npy')
+    parser.add_argument('--output_emb_file', type=str, default="emb.npy",
+            help='path of the output npy embedding file')
     parser.add_argument('--map_file', type=str, default="nodeid_to_index.pickle",
             help='path of the mapping dict that maps node ids to embedding index')
     parser.add_argument('--dim', default=128, type=int, 
@@ -257,14 +262,12 @@ if __name__ == '__main__':
             help="average gradients of sgd for embedding updation")
     parser.add_argument('--num_threads', default=2, type=int, 
             help="number of threads used for each CPU-core/GPU")
-    parser.add_argument('--num_procs', default=1, type=int, 
-            help="number of GPUs/CPUs when mixed training")
-    parser.add_argument('--p', type=float, default=1,
-            help='Return hyperparameter. Default is 1.')
-    parser.add_argument('--q', type=float, default=1,
-            help='Inout hyperparameter. Default is 1.')
-
-    
+    parser.add_argument('--gpus', type=int, default=[-1], nargs='+', 
+            help='a list of active gpu ids, e.g. 0')
+    parser.add_argument('--p', type=float, default=1,  
+            help='value for p')
+    parser.add_argument('--q', type=float, default=1, 
+            help='value for q')
     args = parser.parse_args()
 
     start_time = time.time()

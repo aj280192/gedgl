@@ -12,6 +12,7 @@ def init_emb2pos_index(walk_length, window_size, batch_size):
     ------
     index_emb_posu torch.LongTensor : the indices of u_embeddings
     index_emb_posv torch.LongTensor : the indices of v_embeddings
+
     Usage
     -----
     # emb_u.shape: [batch_size * walk_length, dim]
@@ -44,6 +45,7 @@ def init_emb2neg_index(walk_length, window_size, negative, batch_size):
     ------
     index_emb_negu torch.LongTensor : the indices of u_embeddings
     index_emb_negv torch.LongTensor : the indices of v_embeddings
+
     Usage
     -----
     # emb_u.shape: [batch_size * walk_length, dim]
@@ -72,8 +74,10 @@ def init_emb2neg_index(walk_length, window_size, negative, batch_size):
 
 def init_grad_avg(walk_length, window_size, batch_size):
     '''select nodes' gradients from gradient matrix
+
     Usage
     -----
+
     '''
     grad_avg = []
     for b in range(batch_size):
@@ -128,6 +132,7 @@ class SkipGramModel(nn.Module):
         fast_neg,
         ):
         """ initialize embedding on CPU 
+
         Paremeters
         ----------
         emb_size int : number of nodes
@@ -255,17 +260,20 @@ class SkipGramModel(nn.Module):
         """ Learn a batch of random walks in a fast way. It has the following features:
             1. It calculating the gradients directly without the forward operation.
             2. It does sigmoid by a looking up table.
+
         Specifically, for each positive/negative node pair (i,j), the updating procedure is as following:
             score = self.fast_sigmoid(u_embedding[i].dot(v_embedding[j]))
             # label = 1 for positive samples; label = 0 for negative samples.
             u_embedding[i] += (label - score) * v_embedding[j]
             v_embedding[i] += (label - score) * u_embedding[j]
+
         Parameters
         ----------
         batch_walks list : a list of node sequnces
         lr float : current learning rate
         neg_nodes torch.LongTensor : a long tensor of sampled true negative nodes. If neg_nodes is None,
             then do negative sampling randomly from the nodes in batch_walks as an alternative.
+
         Usage example
         -------------
         batch_walks = [torch.LongTensor([1,2,3,4]), 
@@ -422,6 +430,7 @@ class SkipGramModel(nn.Module):
 
     def save_embedding(self, dataset, file_name):
         """ Write embedding to local file.
+
         Parameter
         ---------
         dataset DeepwalkDataset : the dataset
@@ -432,6 +441,7 @@ class SkipGramModel(nn.Module):
 
     def save_embedding_txt(self, dataset, file_name):
         """ Write embedding to local file. For future use.
+
         Parameter
         ---------
         dataset DeepwalkDataset : the dataset

@@ -1,27 +1,40 @@
+import os
 import numpy as np
 import scipy.sparse as sp
 import pickle
 import torch
 from torch.utils.data import DataLoader
+from dgl.data.utils import download, _get_dgl_url, get_download_dir, extract_archive
 import random
 import time
 import dgl
 from utils import shuffle_walks
-np.random.seed(3141592653)
+#np.random.seed(3141592653)
 
 def ReadTxtNet(file_path="", undirected=True):
     """ Read the txt network file. 
     Notations: The network is unweighted.
+
     Parameters
     ----------
     file_path str : path of network file
     undirected bool : whether the edges are undirected
+
     Return
     ------
     net dict : a dict recording the connections in the graph
     node2id dict : a dict mapping the nodes to their embedding indices 
     id2node dict : a dict mapping nodes embedding indices to the nodes
     """
+    if file_path == 'youtube' or file_path == 'blog':
+        name = file_path
+        dir = get_download_dir()
+        zip_file_path='{}/{}.zip'.format(dir, name)
+        download(_get_dgl_url(os.path.join('dataset/DeepWalk/', '{}.zip'.format(file_path))), path=zip_file_path)
+        extract_archive(zip_file_path,
+                        '{}/{}'.format(dir, name))
+        file_path = "{}/{}/{}-net.txt".format(dir, name, name)
+
     node2id = {}
     id2node = {}
     cid = 0
@@ -74,6 +87,7 @@ def ReadTxtNet(file_path="", undirected=True):
 
 def net2graph(net_sm):
     """ Transform the network to DGL graph
+
     Return 
     ------
     G DGLGraph : graph by DGL
@@ -89,21 +103,22 @@ class Node2vecDataset:
     def __init__(self, 
             net_file,
             map_file,
-            p,
-            q,
             walk_length=80,
             window_size=5,
             num_walks=10,
             batch_size=32,
             negative=5,
-            num_procs=4,
+            gpus=[0],
             fast_neg=True,
+            p=1,
+            q=1
             ):
         """ This class has the following functions:
         1. Transform the txt network file into DGL graph;
         2. Generate random walk sequences for the trainer;
         3. Provide the negative table if the user hopes to sample negative
         nodes according to nodes' degrees;
+
         Parameter
         ---------
         net_file str : path of the txt network file
@@ -119,7 +134,7 @@ class Node2vecDataset:
         self.num_walks = num_walks
         self.batch_size = batch_size
         self.negative = negative
-        self.num_procs = num_procs
+        self.num_procs = len(gpus)
         self.fast_neg = fast_neg
         self.net, self.node2id, self.id2node, self.sm = ReadTxtNet(net_file)
         self.save_mapping(map_file)
@@ -131,7 +146,7 @@ class Node2vecDataset:
         start = time.time()
         self.preprocess_transition_probs()
         print("transition probability calculated in %.2fs" % (time.time() - start))
-
+        
         # random walk seeds
         start = time.time()
         seeds = torch.cat([torch.LongTensor(self.G.nodes())] * num_walks)
@@ -152,20 +167,19 @@ class Node2vecDataset:
             self.neg_table_size = len(self.neg_table)
             self.neg_table = np.array(self.neg_table, dtype=np.long)
             del node_degree
-        
-    def get_alias_edge(self, src, dst):
+    
+    def get_alias_edge(self, nn, el, src, dst):
         '''
         Get the alias edge setup lists for a given edge with uniform weights.
         '''
-        G = self.G
         p = self.p
         q = self.q
         unnormalized_probs = []
         
-        for dst_nbr in sorted(G.successors(dst)):
+        for dst_nbr in sorted(nn[dst]):
             if dst_nbr == src:
                 unnormalized_probs.append(1/p)
-            elif G.has_edges_between(dst_nbr, src):
+            elif (dst_nbr, src) in el:
                 unnormalized_probs.append(1)
             else:
                 unnormalized_probs.append(1/q)
@@ -180,20 +194,27 @@ class Node2vecDataset:
         Preprocessing of transition probabilities for guiding the random walks with uniform weight for edges.
         '''
         
-        G = self.G
-        
+        node_neighbor = {}
+        for node in self.G.nodes():
+            node_neighbor[int(node)] = list(map(int,self.G.successors(node)))
+            
         alias_nodes = {}
         
-        for n in G.nodes():
-            unnormalized_probs_dgl = [1 for _ in G.successors(n)]
+        for n in node_neighbor:
+            unnormalized_probs_dgl = [1 for _ in node_neighbor[n]]
             norm_const_dgl = sum(unnormalized_probs_dgl)
             normalized_probs_dgl =  [float(u_prob)/norm_const_dgl for u_prob in unnormalized_probs_dgl]
             alias_nodes[int(n)] = self.alias_setup(normalized_probs_dgl)
         
+        
+        edges_list = {}
+        for src,dst in zip(self.G.edges()[0],self.G.edges()[1]):
+            edges_list[(int(src),int(dst))] = 1
+            
         alias_edges = {}
         
-        for src,dst in zip(G.edges()[0],G.edges()[1]):
-            alias_edges[(int(src),int(dst))]= self.get_alias_edge(src,dst)
+        for src,dst in edges_list:
+            alias_edges[(src,dst)]= self.get_alias_edge(node_neighbor,edges_list,src,dst)
             
         self.alias_nodes = alias_nodes
         self.alias_edges = alias_edges
@@ -233,17 +254,28 @@ class Node2vecDataset:
         
         return J, q
 
+    
+    
+
     def create_sampler(self, gpu_id):
+        """ Still in construction...
+
+        Several mode:
+        1. do true negative sampling.
+          1.1 from random walk sequence
+          1.2 from node degree distribution
+          return the sampled node ids
+        2. do false negative sampling from random walk sequence
+          save GPU, faster
+          return the node indices in the sequences
         """
-        Using alias random sampling to sample the nodes and generate second order travesal of the graph.
-        """
-        return DeepwalkSampler(self.G, self.seeds[gpu_id], self.walk_length,self.alias_nodes,self.alias_edges,self.p,self.q)
+        return Node2vecSampler(self.G, self.seeds[gpu_id], self.walk_length,self.alias_nodes,self.alias_edges,self.p,self.q)
 
     def save_mapping(self, map_file):
         with open(map_file, "wb") as f:
             pickle.dump(self.node2id, f)
 
-class DeepwalkSampler(object):
+class Node2vecSampler(object):
     def __init__(self, G, seeds, walk_length,alias_nodes,alias_edges,p,q):
         self.G = G
         self.seeds = seeds
@@ -306,4 +338,3 @@ class DeepwalkSampler(object):
             return kk
         else:
             return J[kk]
-
